@@ -1,4 +1,4 @@
-module dgmneto/fly.io/go/echo
+module github.com/dgmneto/fly.io_go/tree/main/echo
 
 go 1.21.1
 
