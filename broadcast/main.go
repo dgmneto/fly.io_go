@@ -1,8 +1,8 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"sort"
 	"sync"
@@ -125,20 +125,15 @@ func PropagateSingleAndRetry(batcher *Batcher, message int64, wg *sync.WaitGroup
 
 func PropagateBatchFn(n *maelstrom.Node, node string, timeout time.Duration) func([]int64) error {
 	return func(messages []int64) error {
-		done := make(chan bool)
+		ctx := context.Background()
+		ctx, cancel_ctx := context.WithDeadline(ctx, time.Now().Add(timeout))
+		defer cancel_ctx()
+
 		body := map[string]any{
 			"type":     "broadcast_batch",
 			"messages": messages,
 		}
-		n.RPC(node, body, func(msg maelstrom.Message) error {
-			done <- true
-			return nil
-		})
-		select {
-		case <-done:
-			return nil
-		case <-time.After(timeout):
-			return fmt.Errorf("Timeout on node %s. Messages %v.", node, messages)
-		}
+		_, err := n.SyncRPC(ctx, node, body)
+		return err
 	}
 }

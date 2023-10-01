@@ -1,9 +1,9 @@
 package main
 
 import (
-	"time"
 	"fmt"
 	"os"
+	"time"
 )
 
 type SingleOp struct {
@@ -18,7 +18,7 @@ type Batcher struct {
 
 func NewBatcher(fn func([]int64) error) *Batcher {
 	return &Batcher{
-		fn: fn,
+		fn:    fn,
 		queue: make(chan SingleOp),
 	}
 }
@@ -35,13 +35,13 @@ func (b *Batcher) Run(max_delay time.Duration) {
 func (b *Batcher) collectFromQueueForDuration(max_delay time.Duration) ([]int64, []chan error) {
 	ops := []int64{}
 	dones := []chan error{}
-	return_on := time.Now().Add(max_delay)
+	timer := time.NewTimer(max_delay)
 	for {
 		select {
 		case op := <-b.queue:
 			ops = append(ops, op.item)
 			dones = append(dones, op.done)
-		case <-time.After(time.Until(return_on)):
+		case <-timer.C:
 			return ops, dones
 		}
 	}
