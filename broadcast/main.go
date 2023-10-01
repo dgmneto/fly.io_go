@@ -2,67 +2,104 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
-
-
 func main() {
 	n := maelstrom.NewNode()
 	messages := NewConcurrentSet()
-	var nodes []string
+	batchers := map[string]*Batcher{}
 
-	n.Handle("topology", func (msg maelstrom.Message) error {
+	n.Handle("topology", func(msg maelstrom.Message) error {
 		var body map[string]any
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		
-		topology := body["topology"].(map[string]any)
-		for _,node := range topology[n.ID()].([]any) {
-			nodes = append(nodes, node.(string))
+		nodes := n.NodeIDs()
+		sort.Strings(nodes)
+		var index int
+		for idx, node := range n.NodeIDs() {
+			if node == n.ID() {
+				index = idx
+				break
+			}
 		}
 
-		return n.Reply(msg, map[string]any {
+		indexes := []int{(index - 1) / 2, index*2 + 1, index*2 + 2}
+		for _, r_index := range indexes {
+			if r_index >= 0 && r_index < len(nodes) {
+				batcher := NewBatcher(PropagateBatchFn(
+					n,
+					nodes[r_index],
+					300*time.Millisecond,
+				))
+				batchers[nodes[r_index]] = batcher
+				go batcher.Run(100 * time.Millisecond)
+			}
+		}
+
+		return n.Reply(msg, map[string]any{
 			"type": "topology_ok",
 		})
 	})
 
-	n.Handle("broadcast", func (msg maelstrom.Message) error {
+	n.Handle("broadcast_batch", func(msg maelstrom.Message) error {
 		var body map[string]any
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
-		
+		for _, message := range body["messages"].([]any) {
+			message := int64(message.(float64))
+			messages.Add(message)
+			for node, batcher := range batchers {
+				if node == msg.Src {
+					continue
+				}
+				go PropagateSingleAndRetry(batcher, message, nil)
+			}
+		}
+		return n.Reply(msg, map[string]any{
+			"type": "broadcast_batch_ok",
+		})
+	})
+
+	n.Handle("broadcast", func(msg maelstrom.Message) error {
+		var body map[string]any
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+
 		message := int64(body["message"].(float64))
 
 		if !messages.Contains(message) {
 			messages.Add(message)
 			var wg sync.WaitGroup
-			for _, node := range nodes {
-				node := node
+			for _, batcher := range batchers {
 				wg.Add(1)
-				go Propagate(n, node, body, &wg)
+				go PropagateSingleAndRetry(batcher, message, &wg)
 			}
+			wg.Wait()
 		}
 
-		return n.Reply(msg, map[string]any {
+		return n.Reply(msg, map[string]any{
 			"type": "broadcast_ok",
 		})
 	})
 
-	n.Handle("read", func (msg maelstrom.Message) error {
+	n.Handle("read", func(msg maelstrom.Message) error {
 		var body map[string]any
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
 
-		return n.Reply(msg, map[string]any {
-			"type": "read_ok",
+		return n.Reply(msg, map[string]any{
+			"type":     "read_ok",
 			"messages": messages.AllItems(),
 		})
 	})
@@ -72,27 +109,36 @@ func main() {
 	}
 }
 
-func Propagate(n *maelstrom.Node, node string, body map[string]any, wg *sync.WaitGroup) {
-	done := make(chan bool)
-	first_try := true
+func PropagateSingleAndRetry(batcher *Batcher, message int64, wg *sync.WaitGroup) {
+	first_try := wg != nil
 	for {
-		n.RPC(node, body, func (msg maelstrom.Message) error {
-			done <- true
-			return nil
-		})
-		var success bool
-		select {
-		case <-done:
-			success = true
-		case <-time.After(150 * time.Millisecond):
-			success = false
-		}
+		err := batcher.Process(message)
 		if first_try {
 			first_try = false
 			wg.Done()
 		}
-		if success {
+		if err == nil {
 			return
+		}
+	}
+}
+
+func PropagateBatchFn(n *maelstrom.Node, node string, timeout time.Duration) func([]int64) error {
+	return func(messages []int64) error {
+		done := make(chan bool)
+		body := map[string]any{
+			"type":     "broadcast_batch",
+			"messages": messages,
+		}
+		n.RPC(node, body, func(msg maelstrom.Message) error {
+			done <- true
+			return nil
+		})
+		select {
+		case <-done:
+			return nil
+		case <-time.After(timeout):
+			return fmt.Errorf("Timeout on node %s. Messages %v.", node, messages)
 		}
 	}
 }

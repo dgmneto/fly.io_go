@@ -5,7 +5,7 @@ import (
 )
 
 type ConcurrentSet struct {
-	mu sync.RWMutex
+	mu    sync.RWMutex
 	items map[int64]struct{}
 }
 
