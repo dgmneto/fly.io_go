@@ -1,7 +1,6 @@
 package main
 
 import (
-	"sync"
 	"time"
 	"fmt"
 	"os"
@@ -13,33 +12,38 @@ type SingleOp struct {
 }
 
 type Batcher struct {
-	mu    sync.Mutex
-	queue []SingleOp
+	queue chan SingleOp
 	fn    func([]int64) error
 }
 
 func NewBatcher(fn func([]int64) error) *Batcher {
 	return &Batcher{
 		fn: fn,
+		queue: make(chan SingleOp),
 	}
 }
 
 func (b *Batcher) Run(max_delay time.Duration) {
 	fmt.Fprintf(os.Stderr, "Starting batcher with %d delay.\n", max_delay)
 	for {
-		b.mu.Lock()
-		queue := b.queue
-		b.queue = []SingleOp{}
-		b.mu.Unlock()
-
-		ops := make([]int64, len(queue))
-		dones := make([]chan error, len(queue))
-		for id, op := range queue {
-			ops[id] = op.item
-			dones[id] = op.done
-		}
+		ops, dones := b.collectFromQueueForDuration(max_delay)
 		go b.processBatch(ops, dones)
 		time.Sleep(max_delay)
+	}
+}
+
+func (b *Batcher) collectFromQueueForDuration(max_delay time.Duration) ([]int64, []chan error) {
+	ops := []int64{}
+	dones := []chan error{}
+	return_on := time.Now().Add(max_delay)
+	for {
+		select {
+		case op := <-b.queue:
+			ops = append(ops, op.item)
+			dones = append(dones, op.done)
+		case <-time.After(time.Until(return_on)):
+			return ops, dones
+		}
 	}
 }
 
@@ -53,11 +57,9 @@ func (b *Batcher) processBatch(ops []int64, dones []chan error) {
 
 func (b *Batcher) Process(op int64) error {
 	done := make(chan error)
-	b.mu.Lock()
-	b.queue = append(b.queue, SingleOp{
+	b.queue <- SingleOp{
 		item: op,
 		done: done,
-	})
-	b.mu.Unlock()
+	}
 	return <-done
 }
